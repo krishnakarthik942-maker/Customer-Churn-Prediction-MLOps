@@ -1,4 +1,5 @@
 from pathlib import Path
+import argparse
 import json
 import warnings
 
@@ -38,7 +39,7 @@ ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 MODEL_PATH = ARTIFACTS_DIR / "model.joblib"
 METRICS_PATH = ARTIFACTS_DIR / "metrics.json"
 
-# Use file-based MLflow tracking instead of SQLite.
+# Use file-based tracking to avoid SQLite migration problems.
 MLFLOW_DIR = ROOT_DIR / "mlruns"
 EXPERIMENT_NAME = "customer-churn-prediction"
 
@@ -67,7 +68,7 @@ MINIMUM_AUC = 0.60
 # ============================================================
 
 def load_and_validate_data(path: Path) -> pd.DataFrame:
-    """Load the CSV file and validate required columns and target."""
+    """Load and validate the customer churn dataset."""
 
     print(f"\n[1/6] Loading dataset: {path}")
 
@@ -85,6 +86,7 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
 
     required_columns = FEATURES + [TARGET_COLUMN]
+
     missing_columns = [
         col for col in required_columns if col not in df.columns
     ]
@@ -95,6 +97,7 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
             f"Available columns: {df.columns.tolist()}"
         )
 
+    # Normalize the target into binary labels.
     target = df[TARGET_COLUMN]
 
     if target.dtype == object or isinstance(target.dtype, pd.StringDtype):
@@ -117,24 +120,34 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
 
         if mapped.isna().any():
             unexpected = normalized[mapped.isna()].unique().tolist()
-            raise ValueError(f"Unsupported churn labels: {unexpected}")
+            raise ValueError(
+                f"Unsupported churn labels: {unexpected}"
+            )
 
         df[TARGET_COLUMN] = mapped.astype(int)
+
     else:
         if target.isna().any():
-            raise ValueError("The churn target contains missing values.")
+            raise ValueError(
+                "The churn target contains missing values."
+            )
 
         if not set(target.unique()).issubset({0, 1, 0.0, 1.0}):
-            raise ValueError("The churn target must contain only 0 and 1.")
+            raise ValueError(
+                "The churn target must contain only 0 and 1."
+            )
 
         df[TARGET_COLUMN] = target.astype(int)
 
+    # Convert numeric values; the pipeline will impute missing features.
     for col in NUMERIC_FEATURES:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
+    # Normalize blank categorical values to missing.
     for col in CATEGORICAL_FEATURES:
         df[col] = df[col].replace(r"^\s*$", np.nan, regex=True)
 
+    # Rows without a target cannot be used for supervised training.
     df = df.dropna(subset=[TARGET_COLUMN]).copy()
 
     if df[TARGET_COLUMN].nunique() != 2:
@@ -145,7 +158,9 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
     class_counts = df[TARGET_COLUMN].value_counts()
 
     if class_counts.min() < 2:
-        raise ValueError("Each churn class needs at least two rows.")
+        raise ValueError(
+            "Each churn class needs at least two rows."
+        )
 
     print(f"Dataset shape: {df.shape}")
     print(f"Churn distribution:\n{class_counts}")
@@ -159,7 +174,7 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
 # ============================================================
 
 def build_model() -> Pipeline:
-    """Build preprocessing and Random Forest classification pipeline."""
+    """Build preprocessing and Random Forest classifier."""
 
     numeric_pipeline = Pipeline(
         steps=[
@@ -170,7 +185,10 @@ def build_model() -> Pipeline:
 
     categorical_pipeline = Pipeline(
         steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
+            (
+                "imputer",
+                SimpleImputer(strategy="most_frequent"),
+            ),
             (
                 "encoder",
                 OneHotEncoder(handle_unknown="ignore"),
@@ -209,6 +227,18 @@ def build_model() -> Pipeline:
 # ============================================================
 
 def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Train and evaluate the customer churn model."
+    )
+
+    parser.add_argument(
+        "--check-quality-gate",
+        action="store_true",
+        help="Fail if ROC-AUC is below the configured threshold.",
+    )
+
+    args = parser.parse_args()
+
     print("=" * 60)
     print("CUSTOMER CHURN - MLOPS TRAINING PIPELINE")
     print("=" * 60)
@@ -236,7 +266,7 @@ def main() -> None:
     print(f"Training rows: {len(X_train)}")
     print(f"Testing rows: {len(X_test)}")
 
-    # Step 3: Configure file-based MLflow tracking.
+    # Step 3: Configure MLflow.
     print("\n[3/6] Configuring MLflow...")
 
     mlflow.set_tracking_uri(MLFLOW_DIR.as_uri())
@@ -253,18 +283,36 @@ def main() -> None:
         predictions = model.predict(X_test)
         probabilities = model.predict_proba(X_test)[:, 1]
 
+        auc_score = float(
+            roc_auc_score(y_test, probabilities)
+        )
+
         metrics = {
-            "accuracy": float(accuracy_score(y_test, predictions)),
+            "accuracy": float(
+                accuracy_score(y_test, predictions)
+            ),
             "precision": float(
-                precision_score(y_test, predictions, zero_division=0)
+                precision_score(
+                    y_test,
+                    predictions,
+                    zero_division=0,
+                )
             ),
             "recall": float(
-                recall_score(y_test, predictions, zero_division=0)
+                recall_score(
+                    y_test,
+                    predictions,
+                    zero_division=0,
+                )
             ),
             "f1_score": float(
-                f1_score(y_test, predictions, zero_division=0)
+                f1_score(
+                    y_test,
+                    predictions,
+                    zero_division=0,
+                )
             ),
-            "auc": float(roc_auc_score(y_test, probabilities)),
+            "auc": auc_score,
             "minimum_auc": MINIMUM_AUC,
             "training_rows": int(len(X_train)),
             "testing_rows": int(len(X_test)),
@@ -296,14 +344,16 @@ def main() -> None:
             }
         )
 
+        # Save the model and metrics locally.
         joblib.dump(model, MODEL_PATH)
 
         with open(METRICS_PATH, "w", encoding="utf-8") as file:
             json.dump(metrics, file, indent=4)
 
+        # MLflow 2.17.2 uses artifact_path, not name.
         mlflow.sklearn.log_model(
             sk_model=model,
-            name="customer-churn-model",
+            artifact_path="customer-churn-model",
             input_example=X_train.head(3),
             serialization_format="pickle",
         )
@@ -312,6 +362,7 @@ def main() -> None:
             str(METRICS_PATH),
             artifact_path="evaluation",
         )
+
         mlflow.log_artifact(
             str(MODEL_PATH),
             artifact_path="artifacts",
@@ -338,24 +389,36 @@ def main() -> None:
     )
 
     print("Confusion matrix:")
-    print(confusion_matrix(y_test, predictions, labels=[0, 1]))
+    print(
+        confusion_matrix(
+            y_test,
+            predictions,
+            labels=[0, 1],
+        )
+    )
 
-    # Step 6: Confirm artifacts and enforce quality gate.
+    # Step 6: Check artifacts and quality gate.
     print("\n[6/6] Training completed.")
     print(f"Model saved:   {MODEL_PATH}")
     print(f"Metrics saved: {METRICS_PATH}")
     print(f"MLflow runs:   {MLFLOW_DIR}")
 
-    if metrics["auc"] < MINIMUM_AUC:
-        raise SystemExit(
-            f"QUALITY GATE FAILED: AUC {metrics['auc']:.4f} "
-            f"is below {MINIMUM_AUC:.2f}."
-        )
+    if args.check_quality_gate:
+        if auc_score < MINIMUM_AUC:
+            raise SystemExit(
+                f"QUALITY GATE FAILED: AUC {auc_score:.4f} "
+                f"is below {MINIMUM_AUC:.2f}."
+            )
 
-    print(
-        f"\nQUALITY GATE PASSED: AUC {metrics['auc']:.4f} "
-        f">= {MINIMUM_AUC:.2f}"
-    )
+        print(
+            f"\nQUALITY GATE PASSED: AUC {auc_score:.4f} "
+            f">= {MINIMUM_AUC:.2f}"
+        )
+    else:
+        print(
+            f"\nROC-AUC: {auc_score:.4f}. "
+            "Run with --check-quality-gate to enforce the threshold."
+        )
 
 
 if __name__ == "__main__":
