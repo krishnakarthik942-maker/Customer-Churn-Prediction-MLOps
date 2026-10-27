@@ -38,9 +38,8 @@ ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 MODEL_PATH = ARTIFACTS_DIR / "model.joblib"
 METRICS_PATH = ARTIFACTS_DIR / "metrics.json"
 
-MLFLOW_DB_PATH = ROOT_DIR / "mlflow.db"
-TRACKING_URI = f"sqlite:///{MLFLOW_DB_PATH.as_posix()}"
-
+# Use file-based MLflow tracking instead of SQLite.
+MLFLOW_DIR = ROOT_DIR / "mlruns"
 EXPERIMENT_NAME = "customer-churn-prediction"
 
 TARGET_COLUMN = "churn"
@@ -86,10 +85,8 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
     df.columns = df.columns.str.strip()
 
     required_columns = FEATURES + [TARGET_COLUMN]
-
     missing_columns = [
-        col for col in required_columns
-        if col not in df.columns
+        col for col in required_columns if col not in df.columns
     ]
 
     if missing_columns:
@@ -98,12 +95,9 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
             f"Available columns: {df.columns.tolist()}"
         )
 
-    # Convert target labels into binary values.
     target = df[TARGET_COLUMN]
 
-    if target.dtype == object or isinstance(
-        target.dtype, pd.StringDtype
-    ):
+    if target.dtype == object or isinstance(target.dtype, pd.StringDtype):
         normalized = target.astype("string").str.strip().str.lower()
 
         target_mapping = {
@@ -123,32 +117,24 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
 
         if mapped.isna().any():
             unexpected = normalized[mapped.isna()].unique().tolist()
-            raise ValueError(
-                f"Unsupported churn labels: {unexpected}"
-            )
+            raise ValueError(f"Unsupported churn labels: {unexpected}")
 
         df[TARGET_COLUMN] = mapped.astype(int)
-
     else:
         if target.isna().any():
             raise ValueError("The churn target contains missing values.")
 
         if not set(target.unique()).issubset({0, 1, 0.0, 1.0}):
-            raise ValueError(
-                "The churn target must contain only 0 and 1."
-            )
+            raise ValueError("The churn target must contain only 0 and 1.")
 
         df[TARGET_COLUMN] = target.astype(int)
 
-    # Convert numeric features to numeric values.
     for col in NUMERIC_FEATURES:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Convert blank categorical values to missing values.
     for col in CATEGORICAL_FEATURES:
         df[col] = df[col].replace(r"^\s*$", np.nan, regex=True)
 
-    # Rows without a target cannot be used for supervised learning.
     df = df.dropna(subset=[TARGET_COLUMN]).copy()
 
     if df[TARGET_COLUMN].nunique() != 2:
@@ -159,9 +145,7 @@ def load_and_validate_data(path: Path) -> pd.DataFrame:
     class_counts = df[TARGET_COLUMN].value_counts()
 
     if class_counts.min() < 2:
-        raise ValueError(
-            "Each churn class needs at least two rows."
-        )
+        raise ValueError("Each churn class needs at least two rows.")
 
     print(f"Dataset shape: {df.shape}")
     print(f"Churn distribution:\n{class_counts}")
@@ -189,10 +173,7 @@ def build_model() -> Pipeline:
             ("imputer", SimpleImputer(strategy="most_frequent")),
             (
                 "encoder",
-                OneHotEncoder(
-                    handle_unknown="ignore",
-                    sparse_output=True,
-                ),
+                OneHotEncoder(handle_unknown="ignore"),
             ),
         ]
     )
@@ -215,14 +196,12 @@ def build_model() -> Pipeline:
         n_jobs=-1,
     )
 
-    model = Pipeline(
+    return Pipeline(
         steps=[
             ("preprocessor", preprocessor),
             ("classifier", classifier),
         ]
     )
-
-    return model
 
 
 # ============================================================
@@ -235,6 +214,7 @@ def main() -> None:
     print("=" * 60)
 
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    MLFLOW_DIR.mkdir(parents=True, exist_ok=True)
 
     # Step 1: Load and validate data.
     df = load_and_validate_data(DATA_PATH)
@@ -242,7 +222,7 @@ def main() -> None:
     X = df[FEATURES].copy()
     y = df[TARGET_COLUMN].astype(int)
 
-    # Step 2: Split the dataset.
+    # Step 2: Split dataset.
     print("\n[2/6] Splitting dataset...")
 
     X_train, X_test, y_train, y_test = train_test_split(
@@ -256,54 +236,35 @@ def main() -> None:
     print(f"Training rows: {len(X_train)}")
     print(f"Testing rows: {len(X_test)}")
 
-    # Step 3: Configure MLflow.
+    # Step 3: Configure file-based MLflow tracking.
     print("\n[3/6] Configuring MLflow...")
 
-    mlflow.set_tracking_uri(TRACKING_URI)
+    mlflow.set_tracking_uri(MLFLOW_DIR.as_uri())
     mlflow.set_experiment(EXPERIMENT_NAME)
 
     model = build_model()
 
-    # Step 4: Train, evaluate and log.
+    # Step 4: Train, evaluate, and log.
     print("\n[4/6] Training Random Forest model...")
 
-    with mlflow.start_run(
-        run_name="random-forest-churn"
-    ) as run:
-
+    with mlflow.start_run(run_name="random-forest-churn") as run:
         model.fit(X_train, y_train)
 
         predictions = model.predict(X_test)
         probabilities = model.predict_proba(X_test)[:, 1]
 
         metrics = {
-            "accuracy": float(
-                accuracy_score(y_test, predictions)
-            ),
+            "accuracy": float(accuracy_score(y_test, predictions)),
             "precision": float(
-                precision_score(
-                    y_test,
-                    predictions,
-                    zero_division=0,
-                )
+                precision_score(y_test, predictions, zero_division=0)
             ),
             "recall": float(
-                recall_score(
-                    y_test,
-                    predictions,
-                    zero_division=0,
-                )
+                recall_score(y_test, predictions, zero_division=0)
             ),
             "f1_score": float(
-                f1_score(
-                    y_test,
-                    predictions,
-                    zero_division=0,
-                )
+                f1_score(y_test, predictions, zero_division=0)
             ),
-            "auc": float(
-                roc_auc_score(y_test, probabilities)
-            ),
+            "auc": float(roc_auc_score(y_test, probabilities)),
             "minimum_auc": MINIMUM_AUC,
             "training_rows": int(len(X_train)),
             "testing_rows": int(len(X_test)),
@@ -335,20 +296,11 @@ def main() -> None:
             }
         )
 
-        # Save the local model first.
         joblib.dump(model, MODEL_PATH)
 
-        # Save metrics.
-        with open(
-            METRICS_PATH,
-            "w",
-            encoding="utf-8",
-        ) as file:
+        with open(METRICS_PATH, "w", encoding="utf-8") as file:
             json.dump(metrics, file, indent=4)
 
-        # Log the model using pickle to avoid the skops
-        # untrusted-type error encountered with this model.
-        # Only load this model from a trusted source.
         mlflow.sklearn.log_model(
             sk_model=model,
             name="customer-churn-model",
@@ -356,12 +308,10 @@ def main() -> None:
             serialization_format="pickle",
         )
 
-        # Log local files to MLflow.
         mlflow.log_artifact(
             str(METRICS_PATH),
             artifact_path="evaluation",
         )
-
         mlflow.log_artifact(
             str(MODEL_PATH),
             artifact_path="artifacts",
@@ -377,7 +327,6 @@ def main() -> None:
         print(f"{name}: {value}")
 
     print("\nClassification report:")
-
     print(
         classification_report(
             y_test,
@@ -389,29 +338,24 @@ def main() -> None:
     )
 
     print("Confusion matrix:")
-    print(
-        confusion_matrix(
-            y_test,
-            predictions,
-            labels=[0, 1],
-        )
-    )
+    print(confusion_matrix(y_test, predictions, labels=[0, 1]))
 
-    # Step 6: Confirm saved files.
-    print("\n[6/6] Training completed successfully.")
+    # Step 6: Confirm artifacts and enforce quality gate.
+    print("\n[6/6] Training completed.")
     print(f"Model saved:   {MODEL_PATH}")
     print(f"Metrics saved: {METRICS_PATH}")
-    print(f"MLflow DB:     {MLFLOW_DB_PATH}")
+    print(f"MLflow runs:   {MLFLOW_DIR}")
 
     if metrics["auc"] < MINIMUM_AUC:
-        print(
-            f"\nWARNING: AUC {metrics['auc']:.4f} is below "
-            f"the configured threshold {MINIMUM_AUC:.2f}."
+        raise SystemExit(
+            f"QUALITY GATE FAILED: AUC {metrics['auc']:.4f} "
+            f"is below {MINIMUM_AUC:.2f}."
         )
-    else:
-        print(
-            f"\nAUC threshold passed: {metrics['auc']:.4f}"
-        )
+
+    print(
+        f"\nQUALITY GATE PASSED: AUC {metrics['auc']:.4f} "
+        f">= {MINIMUM_AUC:.2f}"
+    )
 
 
 if __name__ == "__main__":
