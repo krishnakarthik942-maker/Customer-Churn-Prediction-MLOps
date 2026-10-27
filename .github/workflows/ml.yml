@@ -2,10 +2,7 @@
 
 on:
   push:
-    branches: [main, master]
   pull_request:
-    branches: [main, master]
-  workflow_dispatch:
 
 jobs:
   test-and-train:
@@ -18,22 +15,20 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-          python -m pip install pytest
+        run: python -m pip install -r requirements.txt
 
       - name: Generate sample data
         run: python generate_data.py
 
-      - name: Validate dataset
+      - name: Validate data
         run: python validation.py
 
-      - name: Train customer churn model
-        run: python train.py
+      - name: Train model and enforce quality gate
+        run: python train.py --check-quality-gate
 
       - name: Run automated tests
         run: python -m pytest -v
