@@ -5,3 +5,6 @@ __pycache__/
 .env
 mlruns/
 artifacts/
+# Python virtual environments
+.venv/
+.venv*/
