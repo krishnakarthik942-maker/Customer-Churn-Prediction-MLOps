@@ -19,7 +19,16 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Check MLflow dependencies
+        run: |
+          python -m pip show mlflow SQLAlchemy
+          python -c "import sqlalchemy; print('SQLAlchemy:', sqlalchemy.__version__)"
+          python -c "import mlflow; print('MLflow:', mlflow.__version__)"
+          python -c "from sqlalchemy.pool import QueuePool; print('SQLAlchemy pool import OK')"
 
       - name: Generate sample data
         run: python generate_data.py
