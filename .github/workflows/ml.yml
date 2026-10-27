@@ -22,14 +22,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
+          python -m pip install --force-reinstall "SQLAlchemy==2.0.36"
 
-      - name: Check MLflow dependencies
+      - name: Verify dependencies
         run: |
           python -m pip show mlflow SQLAlchemy
           python -m pip check
-          python -c "import sqlalchemy; print('SQLAlchemy:', sqlalchemy.__version__)"
+          python -c "import sqlalchemy; print('SQLAlchemy:', sqlalchemy.__version__); assert sqlalchemy.__version__.startswith('2.0.'), 'Expected SQLAlchemy 2.0.x'"
+          python -c "from sqlalchemy.pool import FallbackAsyncAdaptedQueuePool; print('FallbackAsyncAdaptedQueuePool import OK')"
           python -c "import mlflow; print('MLflow:', mlflow.__version__)"
-          python -c "from sqlalchemy.pool import QueuePool; print('SQLAlchemy pool import OK')"
           python -c "from mlflow.tracking import MlflowClient; print('MLflow tracking import OK')"
 
       - name: Generate sample data
